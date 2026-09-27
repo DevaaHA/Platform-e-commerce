@@ -1,0 +1,124 @@
+version: '3.8'
+
+services:
+  # 1. قاعدة البيانات العلائقية (PostgreSQL)
+  postgres_db:
+    image: postgres:15-alpine
+    container_name: souqjo_db
+    environment:
+      POSTGRES_USER: souqjo_admin
+      POSTGRES_PASSWORD: securepassword123
+      POSTGRES_DB: souqjo_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - souqjo_network
+    restart: always
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U souqjo_admin -d souqjo_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # 2. نظام الكاش والتخزين المؤقت (Redis)
+  redis:
+    image: redis:7-alpine
+    container_name: souqjo_redis
+    ports:
+      - "6379:6379"
+    networks:
+      - souqjo_network
+    restart: always
+
+  # 3. نظام الـ Backend الأساسي (Django API)
+  backend_api:
+    build: 
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: souqjo_backend
+    command: gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4 --threads 2 --timeout 60
+    volumes:
+      - ./backend:/app
+      - static_volume:/app/static
+      - media_volume:/app/media
+    expose:
+      - "8000"
+    environment:
+      - DATABASE_URL=postgres://souqjo_admin:securepassword123@postgres_db:5432/souqjo_db
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=SouqJo_Super_Secret_Key_2026
+      - DEBUG=False
+      - AI_SERVICE_URL=http://ai_service:8000/api/v1
+    depends_on:
+      postgres_db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - souqjo_network
+    restart: always
+
+  # 4. معالج المهام الخلفية (Celery Worker)
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: souqjo_celery
+    command: celery -A config worker --loglevel=info
+    volumes:
+      - ./backend:/app
+    environment:
+      - DATABASE_URL=postgres://souqjo_admin:securepassword123@postgres_db:5432/souqjo_db
+      - REDIS_URL=redis://redis:6379/0
+      - SECRET_KEY=SouqJo_Super_Secret_Key_2026
+      - DEBUG=False
+    depends_on:
+      - postgres_db
+      - redis
+    networks:
+      - souqjo_network
+    restart: always
+
+  # 5. خدمة الذكاء الاصطناعي (FastAPI AI Service)
+  ai_service:
+    build:
+      context: ./ai_service
+      dockerfile: Dockerfile
+    container_name: souqjo_ai
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+    volumes:
+      - ./ai_service:/app
+    expose:
+      - "8000"
+    networks:
+      - souqjo_network
+    restart: always
+
+  # 6. البوابة الرئيسية والموجه العكسي (Nginx Reverse Proxy)
+  nginx:
+    image: nginx:alpine
+    container_name: souqjo_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf
+      - static_volume:/app/static
+      - media_volume:/app/media
+    depends_on:
+      - backend_api
+      - ai_service
+    networks:
+      - souqjo_network
+    restart: always
+
+volumes:
+  postgres_data:
+  static_volume:
+  media_volume:
+
+networks:
+  souqjo_network:
+    driver: bridge
